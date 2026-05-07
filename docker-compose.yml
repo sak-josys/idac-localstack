@@ -1,0 +1,128 @@
+services:
+  # Single job that mirrors every upstream source we publish from
+  # (dp-config, workflow-orchestration DAGs, spark scripts). Replaces the
+  # three per-publisher sync containers we used to start individually.
+  sync-sources:
+    image: alpine:3.19
+    restart: "no"
+    volumes:
+      - "./:/workspace"
+      - "${DP_CONFIG_AIRFLOW_CONFIGS:-../idac-dp-config/airflow/configs}:/dp-src:ro"
+      - "${WORKFLOW_ORCHESTRATION_ROOT:-../idac-workflow-orchestration}:/orch-src:ro"
+    environment:
+      DP_CONFIG_AIRFLOW_CONFIGS: /dp-src
+      WORKFLOW_ORCHESTRATION_ROOT: /orch-src
+    working_dir: /workspace
+    command: ["sh", "/workspace/scripts/sync-all.sh"]
+
+  localstack:
+    image: localstack/localstack-pro:latest
+    ports:
+      - "4566:4566"
+      # External-services port range used by LocalStack to expose spawned
+      # sibling containers (MWAA Airflow webserver lands somewhere in here).
+      - "4510-4559:4510-4559"
+    env_file:
+      - .env
+    environment:
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:?copy env.sample to .env and set LOCALSTACK_AUTH_TOKEN}
+      SERVICES: ${SERVICES:-s3,iam,ec2,sts,mwaa,logs,sqs}
+      DEBUG: ${DEBUG:-0}
+      PERSISTENCE: ${PERSISTENCE:-0}
+      # MWAA spawns child containers (Airflow scheduler/webserver) on this Docker network
+      # so they can resolve http://localstack:4566.
+      MAIN_DOCKER_NETWORK: idac-localstack
+      MWAA_S3_POLL_INTERVAL: 5
+      # LocalStack MWAA S3 polling can be flaky with the QA prefix that contains
+      # a space, so mount the same placeholder-processed DAGs we upload to S3.
+      MWAA_DOCKER_FLAGS: -v ${PWD:?run docker compose from idac-localstack}/airflow/dags:/opt/airflow/dags:ro -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=ap-northeast-1 -e AWS_ENDPOINT_URL=http://localstack:4566 -e AWS_ENDPOINT_URL_S3=http://localstack:4566
+    volumes:
+      - "./volume:/var/lib/localstack"
+      # MWAA emulator needs to talk to the host Docker daemon to spawn Airflow containers.
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    # AWS CLI rewrites MWAA endpoint hostname by prefixing api./env., so add those as
+    # aliases on this container; otherwise MWAA calls fail with "Could not connect".
+    networks:
+      default:
+        aliases:
+          - localstack
+          - api.localstack
+          - env.localstack
+    depends_on:
+      sync-sources:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # One job: same S3 uploads as CI (configs + DAGs) into idac-airflow-bucket-local.
+  publish-airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.publish-airflow
+    depends_on:
+      sync-sources:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-northeast-1
+      OPENLINEAGE_API_KEY: ${OPENLINEAGE_API_KEY:-local-dev}
+      SKIP_SYNC: "1"
+    volumes:
+      - "./:/workspace"
+      
+  publish-spark-scripts:
+    build:
+      context: .
+      dockerfile: Dockerfile.publish-airflow
+    entrypoint: ["/bin/bash", "/workspace/publishers/workflow-orchestration/scripts/run-publish-pyscripts-to-localstack.sh"]
+    depends_on:
+      sync-sources:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-northeast-1
+    volumes:
+      - "./:/workspace"
+
+  # Pre-pull the image LocalStack MWAA starts via docker.sock. On a clean Docker
+  # machine, pulling it during create-environment can exceed LocalStack's MWAA
+  # startup wait and leave the env in CREATE_FAILED even though Airflow starts later.
+  pull-mwaa-airflow-image:
+    image: localstack/airflow:2.10.3
+    restart: "no"
+    entrypoint: ["/bin/true"]
+
+  # Provision MWAA on LocalStack (VPC + subnets + SG + IAM role + environment) and wait for AVAILABLE.
+  bootstrap-mwaa:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    depends_on:
+      publish-airflow:
+        condition: service_completed_successfully
+      pull-mwaa-airflow-image:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+    environment:
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-northeast-1
+    volumes:
+      - "./:/workspace"
+
+# Pin the network name so MAIN_DOCKER_NETWORK above matches the network compose actually creates.
+networks:
+  default:
+    name: idac-localstack

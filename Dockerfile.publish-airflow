@@ -1,0 +1,8 @@
+FROM amazon/aws-cli:latest
+
+RUN yum install -y bash findutils >/dev/null && yum clean all
+
+WORKDIR /workspace
+
+# amazon/aws-cli image sets ENTRYPOINT to "aws" — override so we run a shell script, not `aws bash ...`.
+ENTRYPOINT ["/bin/bash", "/workspace/scripts/publish-airflow-to-localstack.sh"]
