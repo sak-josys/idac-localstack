@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copy idac-dp-config/airflow/configs -> idac-localstack/publishers/dp-config/airflow/configs (same layout).
+# Copy idac-dp-config/airflow/configs -> publishers/dp-config/airflow/configs.
 # Override source with DP_CONFIG_AIRFLOW_CONFIGS.
 
 set -eu

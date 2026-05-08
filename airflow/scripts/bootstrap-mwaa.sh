@@ -1,12 +1,9 @@
 #!/bin/sh
-# Idempotently provisions the MWAA environment in LocalStack and waits for it to be AVAILABLE.
-# Reuses the airflow bucket created by publish-airflow; reads DAGs from "Airflow Orchestration/".
-#
-# Re-runs are safe: every step does "exists ? reuse : create".
+# Idempotently provision MWAA on LocalStack (VPC + subnets + SG + IAM + env)
+# and wait for AVAILABLE. Re-runs are safe — every step does exists ? reuse : create.
 
 set -eu
 
-# -------- Config ------------------------------------------------------------
 AWS_REGION="${AWS_REGION:-ap-northeast-1}"
 ENDPOINT="${AWS_ENDPOINT_URL:-http://localstack:4566}"
 
@@ -26,7 +23,6 @@ export AWS_DEFAULT_REGION="$AWS_REGION"
 
 aws_() { aws --endpoint-url="$ENDPOINT" "$@"; }
 
-# -------- 1. Wait for LocalStack S3 to answer -------------------------------
 echo "==> Waiting for LocalStack at $ENDPOINT ..."
 i=0
 until aws_ s3 ls "s3://${S3_BUCKET}" >/dev/null 2>&1; do
@@ -39,7 +35,7 @@ until aws_ s3 ls "s3://${S3_BUCKET}" >/dev/null 2>&1; do
 done
 echo "    LocalStack S3 reachable, bucket present."
 
-# -------- 2. VPC ------------------------------------------------------------
+# VPC
 VPC_ID=$(aws_ ec2 describe-vpcs --filters "Name=tag:Name,Values=${VPC_NAME}" \
     --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
 if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
@@ -52,7 +48,7 @@ else
     echo "==> VPC reused:  $VPC_ID"
 fi
 
-# -------- 3. Subnets (two AZs that LocalStack accepts) ----------------------
+# Subnets across two AZs LocalStack accepts.
 ensure_subnet() {
     _name="$1"
     _az="$2"
@@ -75,7 +71,7 @@ ensure_subnet() {
 SUBNET_ID_1=$(ensure_subnet "${VPC_NAME}-subnet-1a" "$AZ_1" "10.192.0.0/24" | tail -n1)
 SUBNET_ID_2=$(ensure_subnet "${VPC_NAME}-subnet-1c" "$AZ_2" "10.192.1.0/24" | tail -n1)
 
-# -------- 4. Security group -------------------------------------------------
+# Security group
 SG_ID=$(aws_ ec2 describe-security-groups \
     --filters "Name=group-name,Values=${SG_NAME}" "Name=vpc-id,Values=${VPC_ID}" \
     --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
@@ -88,7 +84,7 @@ else
     echo "==> SG reused:  $SG_ID"
 fi
 
-# -------- 5. IAM execution role + inline S3/logs policy ---------------------
+# IAM execution role
 TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":["airflow.amazonaws.com","airflow-env.amazonaws.com"]},"Action":"sts:AssumeRole"}]}'
 POLICY='{"Version":"2012-10-17","Statement":[
   {"Effect":"Allow","Action":["s3:GetObject","s3:GetBucket*","s3:List*","s3:PutObject"],
@@ -108,7 +104,7 @@ fi
 ROLE_ARN=$(aws_ iam get-role --role-name "$ROLE_NAME" \
     --query 'Role.Arn' --output text)
 
-# -------- 6. MWAA environment ----------------------------------------------
+# MWAA environment
 create_env() {
     _net=$(printf '{"SubnetIds":["%s","%s"],"SecurityGroupIds":["%s"]}' \
         "$SUBNET_ID_1" "$SUBNET_ID_2" "$SG_ID")
@@ -124,6 +120,7 @@ create_env() {
         --airflow-version "$AIRFLOW_VERSION" \
         --requirements-s3-path "Airflow Orchestration/requirements.txt" \
         --webserver-access-mode PUBLIC_ONLY \
+        --airflow-configuration-options webserver.show_trigger_form_if_no_params=True \
         >/dev/null
 }
 
@@ -141,8 +138,8 @@ delete_env_and_wait() {
     done
 }
 
-# Probe the MWAA webserver via the localstack network alias (the URL LocalStack returns
-# uses localhost.localstack.cloud, which resolves to 127.0.0.1 — wrong inside this container).
+# Probe via the localstack alias — LocalStack's WebserverUrl points at
+# localhost.localstack.cloud which resolves to 127.0.0.1 inside this container.
 probe_mwaa_alive() {
     _url=$(aws_ mwaa get-environment --name "$ENV_NAME" \
         --query 'Environment.WebserverUrl' --output text 2>/dev/null || true)
@@ -157,8 +154,7 @@ EXISTS=$(aws_ mwaa get-environment --name "$ENV_NAME" \
     --query 'Environment.Name' --output text 2>/dev/null || true)
 
 if [ "$EXISTS" = "$ENV_NAME" ]; then
-    # Persisted state can lie (Status=AVAILABLE but sibling container gone after a restart).
-    # Trust the actual webserver, not the persisted status.
+    # Persisted Status=AVAILABLE can lie if the sibling container died — probe instead.
     if probe_mwaa_alive; then
         echo "==> MWAA environment alive: $ENV_NAME"
     else
@@ -170,7 +166,6 @@ else
     create_env
 fi
 
-# -------- 7. Wait for AVAILABLE --------------------------------------------
 echo "==> Waiting for $ENV_NAME to become AVAILABLE ..."
 i=0
 while :; do

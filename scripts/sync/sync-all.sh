@@ -1,8 +1,6 @@
 #!/bin/sh
-# Single entrypoint for the sync-sources compose service.
-# Runs every upstream-source sync we have, sequentially, so we only spin up
-# one alpine container instead of one per publisher. Sequential keeps logs
-# tidy and the file-copy work is fast enough that parallelism isn't worth it.
+# Single entrypoint for the sync-sources compose service. Runs each upstream
+# sync sequentially in one alpine container.
 
 set -eu
 

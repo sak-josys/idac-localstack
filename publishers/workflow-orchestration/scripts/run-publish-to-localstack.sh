@@ -14,7 +14,7 @@ BUCKET="idac-airflow-bucket-local"
 cd "${ROOT}"
 
 if [ ! -d "${ROOT}/dags" ]; then
-  echo "publish-workflow: missing ${ROOT}/dags — run scripts/sync-workflow-orchestration.sh first." >&2
+  echo "publish-workflow: missing ${ROOT}/dags — run scripts/sync/sync-workflow-orchestration.sh first." >&2
   exit 1
 fi
 if [ ! -f "${ROOT}/requirements.txt" ] || [ ! -f "${ROOT}/startup_script.sh" ]; then
@@ -26,7 +26,7 @@ if ! aws s3 ls "s3://${BUCKET}" >/dev/null 2>&1; then
   aws s3 mb "s3://${BUCKET}"
 fi
 
-# CI expects this package folder name inside tmp/; keep it ephemeral only
+# CI expects this package folder name inside tmp/; ephemeral.
 rm -rf tmp
 mkdir -p tmp/josys-workflow-orchestration-0.1
 cp -a "${ROOT}/dags" tmp/josys-workflow-orchestration-0.1/

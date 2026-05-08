@@ -1,12 +1,8 @@
 #!/bin/sh
-
-# LocalStack-only variant of idac-dp-config publish_airflow_configs_to_s3.sh.
-# env is always "local"; bucket_suffix=local; region=ap-northeast-1; tz=Asia/Tokyo.
-#
-# Usage: sh publish_airflow_configs_to_s3.sh
-# Optional overrides via env vars:
-#   VIRTUAL_CLUSTER_ID (default: localstack-placeholder-vc)
-#   ARN_ID             (default: 000000000000)
+# LocalStack variant of idac-dp-config's publish_airflow_configs_to_s3.sh:
+# substitutes {env}/{bucket_suffix}/{arn_id}/etc. and uploads to
+# s3://idac-airflow-bucket-local/Airflow_configs/. Override VIRTUAL_CLUSTER_ID
+# or ARN_ID via env if needed.
 
 set -eu
 

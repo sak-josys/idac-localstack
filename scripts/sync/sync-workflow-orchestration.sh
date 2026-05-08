@@ -1,5 +1,6 @@
 #!/bin/sh
-# Mirror idac-workflow-orchestration into publishers/workflow-orchestration/ (flat: dags/, requirements.txt, startup_script.sh).
+# Mirror idac-workflow-orchestration into publishers/workflow-orchestration/
+# (flat: dags/, requirements.txt, startup_script.sh).
 # Override repo root with WORKFLOW_ORCHESTRATION_ROOT.
 
 set -eu
@@ -23,9 +24,7 @@ if [ ! -f "$SRC/internal_scripts/startup_script.sh" ]; then
   exit 1
 fi
 
-# Drop legacy staging layout if present
 rm -rf "$BASE/staging"
-
 rm -rf "$BASE/dags" "$BASE/requirements.txt" "$BASE/startup_script.sh"
 cp -a "$SRC/dags" "$BASE/"
 cp -a "$SRC/requirements.txt" "$BASE/"

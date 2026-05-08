@@ -18,7 +18,7 @@ docker compose up -d --build
 
 ## Layout after sync
 
-**`publishers/dp-config/airflow/configs/`** mirrors **`idac-dp-config/airflow/configs/`** (see root **`scripts/sync-dp-config.sh`**).
+**`publishers/dp-config/airflow/configs/`** mirrors **`idac-dp-config/airflow/configs/`** (see root **`scripts/sync/sync-dp-config.sh`**).
 
 ## S3
 

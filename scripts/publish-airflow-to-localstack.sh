@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# CI upload-only mirror: idac-dp-config (Airflow_configs/) + idac-workflow-orchestration (Airflow Orchestration/).
-# No tests, CodeArtifact, deployments, or EMR/Spark script uploads (upload_scripts.sh) — add those later if needed.
+# Upload Airflow_configs/ + "Airflow Orchestration/" to idac-airflow-bucket-local
+# (mirrors what CI does for QA, minus tests and EMR script uploads).
 #
-# Host:  export AWS_ENDPOINT_URL=http://localhost:4566  (default below)
-# Compose: AWS_ENDPOINT_URL=http://localstack:4566
-#
-# With docker compose, set SKIP_SYNC=1 so sync-* services remain the single source of copy-from-upstream.
+# Compose runs this with SKIP_SYNC=1 so sync-* services stay the single source
+# of upstream copies.
 
 set -euo pipefail
 
@@ -19,8 +17,8 @@ export AWS_ENDPOINT_URL="${AWS_ENDPOINT_URL:-http://localhost:4566}"
 export OPENLINEAGE_API_KEY="${OPENLINEAGE_API_KEY:-local-dev}"
 
 if [ "${SKIP_SYNC:-0}" != "1" ]; then
-  sh "$ROOT/scripts/sync-dp-config.sh"
-  sh "$ROOT/scripts/sync-workflow-orchestration.sh"
+  sh "$ROOT/scripts/sync/sync-dp-config.sh"
+  sh "$ROOT/scripts/sync/sync-workflow-orchestration.sh"
 fi
 
 echo "=== publish-airflow-to-localstack: dp-config (Airflow_configs/) ==="
