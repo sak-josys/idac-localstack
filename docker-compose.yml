@@ -244,6 +244,8 @@ services:
 
   # EMR-on-EKS emulator. Translates StartJobRun into spark-submit via docker exec
   # into spark-master (client deploy mode for streamable driver logs).
+  # Persists per-job logs to ./logs/<jr_id>/ and (when the operator supplies a
+  # logUri) gzip-uploads stdout.gz + stderr.gz to S3 at the EMR-on-EKS path.
   emr-emulator:
     build:
       context: emr-emulator
@@ -255,13 +257,20 @@ services:
       - "4567:4567"
     environment:
       AWS_REGION: ap-northeast-1
+      AWS_DEFAULT_REGION: ap-northeast-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
       SPARK_MASTER_URL: spark://spark-master:7077
       # Must match spark-master.container_name so docker exec resolves.
       SPARK_MASTER_CONTAINER: idac-localstack-spark-master-1
       S3_ENDPOINT: http://localstack:4566
+      JOB_LOGS_DIR: /var/job-logs
     volumes:
       # RW so cancel-job-run can exec_create a sibling kill.
       - "/var/run/docker.sock:/var/run/docker.sock"
+      # Plain-text driver stdout/stderr per job_run id for quick local debugging.
+      - "./logs:/var/job-logs"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4567/_health', timeout=2).status == 200 else 1)"]
       interval: 5s
