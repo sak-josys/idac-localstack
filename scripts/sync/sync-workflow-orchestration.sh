@@ -5,7 +5,7 @@
 
 set -eu
 
-ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+ROOT="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 SRC="${WORKFLOW_ORCHESTRATION_ROOT:-$ROOT/../idac-workflow-orchestration}"
 BASE="$ROOT/publishers/workflow-orchestration"
 
