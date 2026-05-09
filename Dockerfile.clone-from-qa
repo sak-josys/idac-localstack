@@ -1,0 +1,8 @@
+FROM amazon/aws-cli:latest
+
+RUN yum install -y bash findutils jq >/dev/null && yum clean all
+
+WORKDIR /workspace
+
+# Override the base image's "aws" entrypoint so we run our shell script.
+ENTRYPOINT ["/bin/bash", "/workspace/scripts/bootstrap/clone-from-qa.sh"]

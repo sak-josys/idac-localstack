@@ -16,7 +16,7 @@ BUCKET="idac-airflow-bucket-local"
 cd "${ROOT}"
 
 if [ ! -d "${CONFIG_SRC}" ]; then
-  echo "publish-dp-config: missing ${CONFIG_SRC} — run scripts/sync-dp-config.sh first." >&2
+  echo "publish-dp-config: missing ${CONFIG_SRC} — run scripts/sync/sync-dp-config.sh first." >&2
   exit 1
 fi
 

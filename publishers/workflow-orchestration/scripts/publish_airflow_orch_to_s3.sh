@@ -1,8 +1,6 @@
 #!/bin/sh
-# Local-only publish: same S3 layout as CI (Airflow Orchestration/, CodeArtifact staging on S3 then rm).
-# Expects tmp/josys-workflow-orchestration-0.1/ with dags/, requirements.txt, startup_script.sh.
-#
-# Env: OPENLINEAGE_API_KEY (default: local-dev)
+# Mirrors CI's S3 layout: stages under CodeArtifact/, copies into "Airflow Orchestration/",
+# tears down. Expects tmp/josys-workflow-orchestration-0.1/{dags,requirements.txt,startup_script.sh}.
 
 set -eu
 
@@ -58,7 +56,7 @@ aws s3 sync "$LOCAL_PKG" "$S3_UPLOAD_PATH" \
 
 echo "Staged on S3: $S3_UPLOAD_PATH"
 
-# LocalStack often returns non-zero when the prefix is empty / missing; must not abort first deploy.
+# LocalStack errors on recursive rm of an empty prefix on first deploy.
 aws s3 rm "s3://${S3_BUCKET}/${DAGS_PATH}" --recursive 2>/dev/null || true
 
 aws s3 cp "s3://${S3_BUCKET}/CodeArtifact/airflow/${PACKAGE_NAME}-0.1/dags/idac_airflow" "s3://${S3_BUCKET}/${DAGS_PATH}" --recursive --exclude "resources/*" || error_exit "Failed to copy dags to $DAGS_PATH"
@@ -67,7 +65,7 @@ aws s3 cp "s3://${S3_BUCKET}/CodeArtifact/airflow/${PACKAGE_NAME}-0.1/startup_sc
 
 rm -rf "$DIR" || error_exit "Failed to remove tmp"
 
-# Best-effort cleanup (LocalStack sometimes errors on recursive rm of an empty prefix).
+# Best-effort cleanup of staging prefix.
 aws s3 rm "s3://${S3_BUCKET}/CodeArtifact/airflow/" --recursive 2>/dev/null || true
 
 echo "publish-workflow-orchestration: done -> s3://${S3_BUCKET}/${DAGS_PATH}"

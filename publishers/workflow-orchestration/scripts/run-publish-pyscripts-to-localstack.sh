@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Entrypoint invoked by the publish-spark-scripts compose service.
-# Sets AWS env, ensures the EMR bucket exists, runs publish_pyscripts_to_s3.sh.
+# Entrypoint for the publish-spark-scripts compose service.
 
 set -euo pipefail
 
@@ -17,7 +16,7 @@ cd "${ROOT}"
 if [ ! -d "${ROOT}/pyScripts/churn_deletion" ] \
   || [ ! -d "${ROOT}/pyScripts/delta_optimization" ] \
   || [ ! -d "${ROOT}/pyScripts/vacuum_delta" ]; then
-  echo "publish-spark-scripts: pyScripts/ not synced — run scripts/sync-spark-scripts.sh first." >&2
+  echo "publish-spark-scripts: pyScripts/ not synced — run scripts/sync/sync-spark-scripts.sh first." >&2
   exit 1
 fi
 

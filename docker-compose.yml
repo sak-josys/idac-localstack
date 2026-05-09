@@ -1,7 +1,5 @@
 services:
-  # Single job that mirrors every upstream source we publish from
-  # (dp-config, workflow-orchestration DAGs, spark scripts). Replaces the
-  # three per-publisher sync containers we used to start individually.
+  # Mirrors upstream sources (dp-config, workflow-orchestration, spark scripts) into ./publishers/.
   sync-sources:
     image: alpine:3.19
     restart: "no"
@@ -13,35 +11,27 @@ services:
       DP_CONFIG_AIRFLOW_CONFIGS: /dp-src
       WORKFLOW_ORCHESTRATION_ROOT: /orch-src
     working_dir: /workspace
-    command: ["sh", "/workspace/scripts/sync-all.sh"]
+    command: ["sh", "/workspace/scripts/sync/sync-all.sh"]
 
   localstack:
     image: localstack/localstack-pro:latest
     ports:
       - "4566:4566"
-      # External-services port range used by LocalStack to expose spawned
-      # sibling containers (MWAA Airflow webserver lands somewhere in here).
+      # External-services port range LocalStack uses for spawned MWAA containers.
       - "4510-4559:4510-4559"
-    env_file:
-      - .env
     environment:
       LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:?copy env.sample to .env and set LOCALSTACK_AUTH_TOKEN}
-      SERVICES: ${SERVICES:-s3,iam,ec2,sts,mwaa,logs,sqs}
+      SERVICES: ${SERVICES:-s3,iam,ec2,sts,mwaa,logs,sqs,glue}
       DEBUG: ${DEBUG:-0}
       PERSISTENCE: ${PERSISTENCE:-0}
-      # MWAA spawns child containers (Airflow scheduler/webserver) on this Docker network
-      # so they can resolve http://localstack:4566.
       MAIN_DOCKER_NETWORK: idac-localstack
       MWAA_S3_POLL_INTERVAL: 5
-      # LocalStack MWAA S3 polling can be flaky with the QA prefix that contains
-      # a space, so mount the same placeholder-processed DAGs we upload to S3.
-      MWAA_DOCKER_FLAGS: -v ${PWD:?run docker compose from idac-localstack}/airflow/dags:/opt/airflow/dags:ro -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=ap-northeast-1 -e AWS_ENDPOINT_URL=http://localstack:4566 -e AWS_ENDPOINT_URL_S3=http://localstack:4566
+      # Routes MWAA-spawned Airflow's EmrContainerOperator to our emulator.
+      MWAA_DOCKER_FLAGS: -v ${PWD:?run docker compose from idac-localstack}/airflow/dags:/opt/airflow/dags:ro -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=ap-northeast-1 -e AWS_ENDPOINT_URL=http://localstack:4566 -e AWS_ENDPOINT_URL_S3=http://localstack:4566 -e AWS_ENDPOINT_URL_EMR_CONTAINERS=http://emr-emulator:4567
     volumes:
       - "./volume:/var/lib/localstack"
-      # MWAA emulator needs to talk to the host Docker daemon to spawn Airflow containers.
       - "/var/run/docker.sock:/var/run/docker.sock"
-    # AWS CLI rewrites MWAA endpoint hostname by prefixing api./env., so add those as
-    # aliases on this container; otherwise MWAA calls fail with "Could not connect".
+    # AWS CLI prefixes MWAA endpoints with api./env., so alias them on the network.
     networks:
       default:
         aliases:
@@ -58,7 +48,6 @@ services:
       retries: 10
       start_period: 10s
 
-  # One job: same S3 uploads as CI (configs + DAGs) into idac-airflow-bucket-local.
   publish-airflow:
     build:
       context: .
@@ -77,7 +66,7 @@ services:
       SKIP_SYNC: "1"
     volumes:
       - "./:/workspace"
-      
+
   publish-spark-scripts:
     build:
       context: .
@@ -96,15 +85,99 @@ services:
     volumes:
       - "./:/workspace"
 
-  # Pre-pull the image LocalStack MWAA starts via docker.sock. On a clean Docker
-  # machine, pulling it during create-environment can exceed LocalStack's MWAA
-  # startup wait and leave the env in CREATE_FAILED even though Airflow starts later.
+  # One-time bootstrap: clone-from-qa + setup-glue self-skip unless BOOTSTRAP=true.
+  # LocalStack PERSISTENCE=1 keeps S3 + Glue across restarts, so they stay no-ops
+  # day-to-day. Flip BOOTSTRAP=true to re-sync from QA or change schemas.
+  clone-from-qa:
+    build:
+      context: .
+      dockerfile: Dockerfile.clone-from-qa
+    entrypoint: ["/bin/bash", "/workspace/scripts/bootstrap/clone-from-qa.sh"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      BOOTSTRAP: ${BOOTSTRAP:-false}
+      QA_AWS_ACCESS_KEY_ID: ${QA_AWS_ACCESS_KEY_ID:-}
+      QA_AWS_SECRET_ACCESS_KEY: ${QA_AWS_SECRET_ACCESS_KEY:-}
+      QA_AWS_SESSION_TOKEN: ${QA_AWS_SESSION_TOKEN:-}
+      QA_AWS_REGION: ${QA_AWS_REGION:-ap-northeast-1}
+      QA_PREFIXES: ${QA_PREFIXES:-}
+      AWS_ENDPOINT_URL: http://localstack:4566
+    volumes:
+      - "./:/workspace"
+    restart: "no"
+
+  # Registers Glue DBs + tables from idac-dp-config into LocalStack. Single
+  # spark-submit (local mode) for all configs to skip per-file JVM startup.
+  # Reuses the spark image (PySpark + Hadoop-AWS + Delta JARs already baked in).
+  setup-glue:
+    build:
+      context: spark
+      dockerfile: Dockerfile
+    image: idac-localstack-spark:latest
+    entrypoint: ["/bin/bash", "/workspace/scripts/bootstrap/setup-glue/setup-glue.sh"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+      # Ordering only — clone-from-qa exits 0 whether it ran or self-skipped.
+      clone-from-qa:
+        condition: service_completed_successfully
+    environment:
+      BOOTSTRAP: ${BOOTSTRAP:-false}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-northeast-1
+      AWS_REGION: ap-northeast-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      DP_CONFIG_ROOT: /dp-config
+      EMR_BUCKET: ${EMR_BUCKET:-idac-emr-bucket-local}
+      TARGET_ENV: local
+      BUCKET_SUFFIX: local
+      # Optional scopes: GLUE_SECTIONS=gold, GLUE_TABLES=rollup_logic.
+      GLUE_SECTIONS: ${GLUE_SECTIONS:-}
+      GLUE_TABLES: ${GLUE_TABLES:-}
+    volumes:
+      - "./:/workspace"
+      - "${DP_CONFIG_ROOT_HOST:-../idac-dp-config}:/dp-config:ro"
+    restart: "no"
+
+  # Pre-pull the airflow image so LocalStack MWAA's create-environment doesn't
+  # time out waiting on a Maven-sized download.
   pull-mwaa-airflow-image:
     image: localstack/airflow:2.10.3
     restart: "no"
     entrypoint: ["/bin/true"]
 
-  # Provision MWAA on LocalStack (VPC + subnets + SG + IAM role + environment) and wait for AVAILABLE.
+  # `docker compose down` doesn't remove LocalStack-spawned MWAA containers
+  # (they're docker.sock siblings), and a stale name blocks the next create.
+  cleanup-mwaa-orphans:
+    image: docker:27-cli
+    restart: "no"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    environment:
+      MWAA_CONTAINER_NAME: localstack-mwaa-000000000000-ap-northeast-1-idac-local-airflow
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        ids=$$(docker ps -aq \
+          --filter "name=^/$${MWAA_CONTAINER_NAME}$$" \
+          --filter "status=created" \
+          --filter "status=exited" \
+          --filter "status=dead")
+        if [ -n "$$ids" ]; then
+          echo "==> Removing stale MWAA container(s): $$ids"
+          docker rm -f $$ids
+        else
+          echo "==> No stale MWAA child containers found"
+        fi
+
+  # Provisions VPC + subnets + SG + IAM role + MWAA env, waits for AVAILABLE.
   bootstrap-mwaa:
     build:
       context: .
@@ -114,6 +187,8 @@ services:
         condition: service_completed_successfully
       pull-mwaa-airflow-image:
         condition: service_completed_successfully
+      cleanup-mwaa-orphans:
+        condition: service_completed_successfully
       localstack:
         condition: service_healthy
     environment:
@@ -122,7 +197,80 @@ services:
     volumes:
       - "./:/workspace"
 
-# Pin the network name so MAIN_DOCKER_NETWORK above matches the network compose actually creates.
+  # Local Spark cluster (master + worker) used by emr-emulator to run real PySpark jobs.
+  spark-master:
+    build:
+      context: spark
+      dockerfile: Dockerfile
+    image: idac-localstack-spark:latest
+    container_name: idac-localstack-spark-master-1
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-northeast-1
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    volumes:
+      - "./:/workspace"
+    restart: unless-stopped
+
+  spark-worker:
+    image: idac-localstack-spark:latest
+    depends_on:
+      - spark-master
+    command:
+      - "/opt/spark/bin/spark-class"
+      - "org.apache.spark.deploy.worker.Worker"
+      - "--cores"
+      - "2"
+      - "--memory"
+      - "2G"
+      - "spark://spark-master:7077"
+    # Upstream PySpark scripts pin spark.hadoop.fs.s3a.aws.credentials.provider
+    # to DefaultAWSCredentialsProviderChain, which ignores the access.key/secret.key
+    # confs and only reads env vars / IMDS. Executors must therefore find AWS
+    # creds in their JVM environment to talk to LocalStack S3.
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-northeast-1
+    ports:
+      - "8081:8081"
+    volumes:
+      - "./:/workspace"
+    restart: unless-stopped
+
+  # EMR-on-EKS emulator. Translates StartJobRun into spark-submit via docker exec
+  # into spark-master (client deploy mode for streamable driver logs).
+  emr-emulator:
+    build:
+      context: emr-emulator
+      dockerfile: Dockerfile
+    image: idac-localstack-emr-emulator:latest
+    depends_on:
+      - spark-master
+    ports:
+      - "4567:4567"
+    environment:
+      AWS_REGION: ap-northeast-1
+      SPARK_MASTER_URL: spark://spark-master:7077
+      # Must match spark-master.container_name so docker exec resolves.
+      SPARK_MASTER_CONTAINER: idac-localstack-spark-master-1
+      S3_ENDPOINT: http://localstack:4566
+    volumes:
+      # RW so cancel-job-run can exec_create a sibling kill.
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4567/_health', timeout=2).status == 200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+# Pin the network name so MAIN_DOCKER_NETWORK above matches.
 networks:
   default:
     name: idac-localstack
