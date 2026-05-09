@@ -4,7 +4,7 @@
 
 set -eu
 
-ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+ROOT="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 SRC="${DP_CONFIG_AIRFLOW_CONFIGS:-$ROOT/../idac-dp-config/airflow/configs}"
 DST="$ROOT/publishers/dp-config/airflow/configs"
 
