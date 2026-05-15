@@ -1,0 +1,8 @@
+      // [LOCAL-PATCH] honor AWS_ENDPOINT_URL when set (LocalStack runs); fall
+      // back to upstream's s3.amazonaws.com so QA/prod behaviour is unchanged.
+      // Why this is needed: SparkSession.builder.config(...) here happens AFTER
+      // spark-submit has parsed our --conf spark.hadoop.fs.s3a.endpoint, and
+      // overrides it with the prod value. That silently routes every post-init
+      // S3A call (notably AuditTableHandler.exists at the start of every gold
+      // / silver / migration job) at real AWS, which 403s our test/test creds.
+      .config("spark.hadoop.fs.s3a.endpoint", sys.env.getOrElse("AWS_ENDPOINT_URL", "s3.amazonaws.com"))

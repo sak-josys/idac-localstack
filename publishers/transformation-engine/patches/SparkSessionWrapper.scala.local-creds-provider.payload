@@ -1,0 +1,8 @@
+      // [LOCAL-PATCH] On LocalStack we want SimpleAWSCredentialsProvider, which
+      // reads the test/test creds we set via --conf spark.hadoop.fs.s3a.access.key
+      // / secret.key. The upstream DefaultAWSCredentialsProviderChain walks env →
+      // sysprops → STS → EC2 IMDS → ECS metadata; on a developer laptop those
+      // can return real-AWS-shaped creds and route requests to real AWS, masking
+      // every LocalStack-targeted operation behind a 403. In QA/prod this branch
+      // is dead code and behaviour is identical to the upstream chain.
+      .config("spark.hadoop.fs.s3a.aws.credentials.provider", if (sys.env.contains("AWS_ENDPOINT_URL")) "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider" else "com.amazonaws.auth.DefaultAWSCredentialsProviderChain")

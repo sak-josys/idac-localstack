@@ -1,0 +1,28 @@
+        // [LOCAL-PATCH] Injected by idac-localstack/publishers/transformation-engine/
+        // patches/GlueClientProvider.scala.local-glue-endpoint.payload — applied
+        // transiently for builds that target the local stack and reverted right
+        // after sbt assembly (see apply-local-build-patches.sh / revert-local-build-patches.sh).
+        //
+        // Rationale: the upstream non-local branch builds the Glue SDK client
+        // with no explicit endpoint or region, which means it talks to real
+        // glue.<region>.amazonaws.com and 400s with UnrecognizedClientException
+        // for our test/test creds. The upstream "local" branch is gated on a
+        // FILE_SYSTEM=local env var that nothing in this stack sets, and it
+        // hard-codes http://localhost:9999 as the mock endpoint anyway — which
+        // doesn't match LocalStack at http://localstack:4566. Rather than
+        // wiring FILE_SYSTEM and a separate mock, we honour AWS_ENDPOINT_URL
+        // (the same env var S3A and the rest of the SDK look at). When it's
+        // unset (real QA/prod) this branch is dead code and behaviour is
+        // identical to the upstream one-liner.
+        sys.env.get("AWS_ENDPOINT_URL") match {
+          case Some(endpoint) =>
+            AWSGlueClientBuilder
+              .standard()
+              .withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(
+                endpoint,
+                sys.env.getOrElse("AWS_REGION", sys.env.getOrElse("AWS_DEFAULT_REGION", region))))
+              .withCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(accessKey, secretKey)))
+              .build()
+          case None =>
+            AWSGlueClientBuilder.standard().build()
+        }

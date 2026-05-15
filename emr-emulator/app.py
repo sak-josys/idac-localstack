@@ -117,6 +117,66 @@ def _strip_deploy_mode(tokens: list[str]) -> list[str]:
     return out
 
 
+# Prod-shaped Hadoop confs that the engine's airflow layer ships in every
+# sparkSubmitParameters payload. These describe what the EMR-on-EKS cluster
+# does in QA/prod and are simply wrong on LocalStack — they enable SSL,
+# SSE-KMS, S3 bucket-key encryption, none of which LocalStack supports and
+# all of which break S3A in subtle ways (e.g. SSL=true makes S3A wrap
+# requests through HTTPS even when the endpoint is plain http://, which has
+# manifested as "request reaches real AWS instead of LocalStack" depending
+# on where in the connection setup the failure surfaces). We strip them
+# unconditionally and re-set the LocalStack-correct values further down so
+# there is exactly one value per key in the final argv — defensive against
+# any "first wins" parsing surprises in spark-submit.
+_STRIP_USER_CONF_KEYS = (
+    "spark.hadoop.fs.s3a.server-side-encryption-algorithm",
+    "spark.hadoop.fs.s3a.connection.ssl.enabled",
+    "spark.hadoop.fs.s3a.bucket-key-enabled",
+)
+
+
+def _strip_conflicting_confs(tokens: list[str]) -> list[str]:
+    """Remove ``--conf <KEY>=<V>`` pairs whose KEY conflicts with our overrides."""
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--conf" and i + 1 < len(tokens):
+            kv = tokens[i + 1]
+            key = kv.split("=", 1)[0]
+            if key in _STRIP_USER_CONF_KEYS:
+                i += 2
+                continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+_S3_SCHEME_PREFIX = "s3://"
+_S3A_SCHEME_PREFIX = "s3a://"
+
+
+def _rewrite_s3_to_s3a(token: str) -> str:
+    """Rewrite every ``s3://`` occurrence in a single token to ``s3a://``.
+
+    Real EMR exposes the ``s3://`` scheme via EMRFS; standalone Spark only ships
+    the Hadoop ``s3a`` connector, so the bare ``s3`` scheme blows up at filesystem
+    resolution time (``UnsupportedFileSystemException: No FileSystem for scheme
+    "s3"``) — most visibly when Spark resolves ``--jars s3://...`` glob paths
+    before the driver even starts.
+
+    Substring (not prefix) replace is intentional: ``s3://`` shows up not just
+    at the start of a token but also embedded — e.g. ``clientConf=s3://...``
+    in entryPointArguments, or ``--conf spark.something.path=s3://...``. We
+    don't try to be clever about whether a given occurrence is a real URI;
+    the literal ``s3://`` substring is unique enough that false positives are
+    not a concern in practice.
+    """
+    if _S3_SCHEME_PREFIX not in token:
+        return token
+    return token.replace(_S3_SCHEME_PREFIX, _S3A_SCHEME_PREFIX)
+
+
 def _build_spark_submit_cmd(spark_driver: dict[str, Any]) -> list[str]:
     """Translate sparkSubmitJobDriver into a spark-submit argv.
 
@@ -127,9 +187,7 @@ def _build_spark_submit_cmd(spark_driver: dict[str, Any]) -> list[str]:
     user_params = spark_driver.get("sparkSubmitParameters", "") or ""
     user_args = spark_driver.get("entryPointArguments", []) or []
 
-    # EMR-on-EKS contracts use s3://; Hadoop on Spark only knows s3a://.
-    if entry_point.startswith("s3://"):
-        entry_point = "s3a://" + entry_point[len("s3://") :]
+    entry_point = _rewrite_s3_to_s3a(entry_point)
 
     cmd: list[str] = [
         SPARK_SUBMIT_BIN,
@@ -137,18 +195,23 @@ def _build_spark_submit_cmd(spark_driver: dict[str, Any]) -> list[str]:
         "--deploy-mode", "client",
     ]
 
-    cmd.extend(_strip_deploy_mode(shlex.split(user_params)))
+    user_tokens = _strip_conflicting_confs(_strip_deploy_mode(shlex.split(user_params)))
+    cmd.extend(_rewrite_s3_to_s3a(t) for t in user_tokens)
 
     # LocalStack-friendly S3A + right-sized executors. SSE-KMS unset because
     # LocalStack has no KMS key; SSL off because LocalStack speaks plain HTTP.
     cmd.extend([
         "--conf", f"spark.hadoop.fs.s3a.endpoint={S3_ENDPOINT}",
+        "--conf", "spark.hadoop.fs.s3a.endpoint.region=us-east-1",
         "--conf", "spark.hadoop.fs.s3a.path.style.access=true",
         "--conf", "spark.hadoop.fs.s3a.connection.ssl.enabled=false",
         "--conf", "spark.hadoop.fs.s3a.access.key=test",
         "--conf", "spark.hadoop.fs.s3a.secret.key=test",
+        "--conf", "spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
         "--conf", "spark.hadoop.fs.s3a.server-side-encryption-algorithm=",
         "--conf", "spark.hadoop.fs.s3a.bucket-key-enabled=false",
+        "--conf", "spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "--conf", "spark.hadoop.fs.AbstractFileSystem.s3.impl=org.apache.hadoop.fs.s3a.S3A",
         "--conf", "spark.dynamicAllocation.enabled=false",
         "--conf", "spark.executor.instances=1",
         "--conf", "spark.executor.cores=1",

@@ -25,6 +25,8 @@ TMPDIR="/tmp/qa-clone"
 QA_PREFIXES_DEFAULT="qa/gold qa/silver qa/bronze qa/common"
 QA_PREFIXES="${QA_PREFIXES:-$QA_PREFIXES_DEFAULT}"
 
+QA_TO_LOCAL_DATA_PATH_REWRITE="${QA_TO_LOCAL_DATA_PATH_REWRITE:-true}"
+
 # Drop AWS_ENDPOINT_URL* — otherwise AWS CLI v2 routes the QA call to LocalStack.
 qa_aws() {
     env -u AWS_ENDPOINT_URL -u AWS_ENDPOINT_URL_S3 \
@@ -40,6 +42,17 @@ local_aws() {
     AWS_SECRET_ACCESS_KEY=test \
     AWS_DEFAULT_REGION=ap-northeast-1 \
     aws --endpoint-url "$LOCAL_ENDPOINT" --no-cli-pager "$@"
+}
+
+qa_to_local_data_path() {
+    local path="$1"
+
+    if [ "$QA_TO_LOCAL_DATA_PATH_REWRITE" != "true" ]; then
+        printf '%s\n' "$path"
+        return
+    fi
+
+    printf '%s\n' "$path" | sed -E 's#(^|/)qa_#\1local_#g'
 }
 
 echo "==> QA -> Local data clone"
@@ -67,6 +80,7 @@ for prefix in $QA_PREFIXES; do
         qa)   dst_prefix="local" ;;
         *)    dst_prefix="$prefix" ;;
     esac
+    dst_prefix="$(qa_to_local_data_path "$dst_prefix")"
 
     src="s3://${QA_BUCKET}/${prefix}/"
     dst="s3://${LOCAL_BUCKET}/${dst_prefix}/"

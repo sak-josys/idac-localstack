@@ -1,0 +1,26 @@
+    // [LOCAL-PATCH] Injected by idac-localstack/publishers/transformation-engine/
+    // patches/S3Reader.scala.local-s3client.payload — applied transiently for
+    // builds that target the local stack and reverted right after `sbt assembly`
+    // (see apply-local-build-patches.sh / revert-local-build-patches.sh).
+    //
+    // Rationale: the prod-shaped AmazonS3ClientBuilder.standard() consults the
+    // SDK v1 region provider chain, which falls through to EC2 IMDS
+    // (169.254.169.254) on networks where IMDS is unreachable. From inside our
+    // spark-master container that hangs ~5s and then dies with
+    // "Unable to find a region via the region provider chain", masking the real
+    // intent (read .conf from LocalStack S3). When AWS_ENDPOINT_URL is set we
+    // wire endpoint + region + path-style addressing explicitly. When it is not
+    // set (i.e. real QA / prod), this branch is dead code and behaviour is
+    // identical to the upstream one-liner.
+    val s3Client: AmazonS3 = sys.env.get("AWS_ENDPOINT_URL") match {
+      case Some(endpoint) =>
+        AmazonS3ClientBuilder.standard()
+          .withEndpointConfiguration(new com.amazonaws.client.builder.AwsClientBuilder.EndpointConfiguration(
+            endpoint,
+            sys.env.getOrElse("AWS_REGION", sys.env.getOrElse("AWS_DEFAULT_REGION", "ap-northeast-1"))))
+          .withPathStyleAccessEnabled(true)
+          .withCredentials(credentialsProvider)
+          .build()
+      case None =>
+        AmazonS3ClientBuilder.standard().withCredentials(credentialsProvider).build()
+    }

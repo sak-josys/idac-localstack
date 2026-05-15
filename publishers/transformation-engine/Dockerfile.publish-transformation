@@ -1,0 +1,33 @@
+# Lightweight runner for the transformation-engine publish pipeline.
+# Carries everything the chained scripts need:
+#   - aws-cli         (s3 calls in jar-to-intermediate.sh / intermediate-to-s3.sh)
+#   - bash            (orchestrator script + chained scripts run on bash)
+#   - zip + unzip     (asset packaging in jar-to-intermediate.sh + extraction in intermediate-to-s3.sh)
+#   - curl            (delta-*.jar fetches from Maven Central)
+#   - coreutils       (sha256sum, du; alpine ships busybox versions which differ subtly)
+#   - findutils       (rebuild-trigger detection in build-or-detect-jar.sh expects GNU find)
+#   - git             (auto-version derivation from engine repo HEAD)
+#   - docker-cli      (sibling-spawn the sbt builder image via the host's docker socket)
+#
+# Alpine is preferred for size (~120MB vs ~600MB+ for amazonlinux+awscli). Using the
+# 3.19 line because it ships aws-cli v2 in apk; older alpines only have v1.
+
+FROM alpine:3.19
+
+RUN apk add --no-cache \
+        bash \
+        aws-cli \
+        zip \
+        unzip \
+        curl \
+        coreutils \
+        findutils \
+        git \
+        docker-cli
+
+WORKDIR /workspace
+
+# The orchestrator is the entrypoint, so `docker compose run --rm publish-transformation silver`
+# becomes `publish-transformation-module.sh silver` inside the container. Keeps the
+# developer interaction minimal: one image, one command, one positional argument.
+ENTRYPOINT ["/workspace/publishers/transformation-engine/scripts/publish-transformation-module.sh"]

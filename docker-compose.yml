@@ -21,7 +21,7 @@ services:
       - "4510-4559:4510-4559"
     environment:
       LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:?copy env.sample to .env and set LOCALSTACK_AUTH_TOKEN}
-      SERVICES: ${SERVICES:-s3,iam,ec2,sts,mwaa,logs,sqs,glue}
+      SERVICES: ${SERVICES:-s3,iam,ec2,sts,mwaa,logs,sqs,glue,athena}
       DEBUG: ${DEBUG:-0}
       PERSISTENCE: ${PERSISTENCE:-0}
       MAIN_DOCKER_NETWORK: idac-localstack
@@ -110,6 +110,57 @@ services:
       - "./:/workspace"
     restart: "no"
 
+  clone-emr-artifacts-from-qa:
+    build:
+      context: .
+      dockerfile: Dockerfile.clone-from-qa
+    entrypoint: ["/bin/bash", "/workspace/scripts/bootstrap/clone-emr-artifacts-from-qa.sh"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      BOOTSTRAP: ${BOOTSTRAP:-false}
+      QA_AWS_ACCESS_KEY_ID: ${QA_AWS_ACCESS_KEY_ID:-}
+      QA_AWS_SECRET_ACCESS_KEY: ${QA_AWS_SECRET_ACCESS_KEY:-}
+      QA_AWS_SESSION_TOKEN: ${QA_AWS_SESSION_TOKEN:-}
+      QA_AWS_REGION: ${QA_AWS_REGION:-ap-northeast-1}
+      QA_EMR_BUCKET: ${QA_EMR_BUCKET:-idac-emr-bucket-qa}
+      LOCAL_EMR_BUCKET: ${LOCAL_EMR_BUCKET:-idac-emr-bucket-local}
+      QA_EMR_PREFIXES: ${QA_EMR_PREFIXES:-}
+      AWS_ENDPOINT_URL: http://localstack:4566
+    volumes:
+      - "./:/workspace"
+    restart: "no"
+  sync-sidsum-from-qa:
+    build:
+      context: .
+      dockerfile: Dockerfile.clone-from-qa
+    entrypoint: ["/bin/bash", "/workspace/scripts/bootstrap/sync-sidsum-from-qa.sh"]
+    profiles: ["sidsum"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      QA_AWS_ACCESS_KEY_ID: ${QA_AWS_ACCESS_KEY_ID:-}
+      QA_AWS_SECRET_ACCESS_KEY: ${QA_AWS_SECRET_ACCESS_KEY:-}
+      QA_AWS_SESSION_TOKEN: ${QA_AWS_SESSION_TOKEN:-}
+      QA_AWS_REGION: ${QA_AWS_REGION:-ap-northeast-1}
+      QA_DATA_BUCKET: ${QA_DATA_BUCKET:-idac-data-qa}
+      QA_EMR_BUCKET: ${QA_EMR_BUCKET:-idac-emr-bucket-qa}
+      LOCAL_DATA_BUCKET: ${LOCAL_DATA_BUCKET:-idac-data-local}
+      LOCAL_EMR_BUCKET: ${LOCAL_EMR_BUCKET:-idac-emr-bucket-local}
+      FORCE_REFRESH: ${FORCE_REFRESH:-false}
+      FORCE_REFRESH_BIG: ${FORCE_REFRESH_BIG:-false}
+      QA_TO_LOCAL_REWRITE: ${QA_TO_LOCAL_REWRITE:-true}
+      AWS_ENDPOINT_URL: http://localstack:4566
+    volumes:
+      - "./:/workspace"
+    restart: "no"
+
   # Registers Glue DBs + tables from idac-dp-config into LocalStack. Single
   # spark-submit (local mode) for all configs to skip per-file JVM startup.
   # Reuses the spark image (PySpark + Hadoop-AWS + Delta JARs already baked in).
@@ -124,6 +175,8 @@ services:
         condition: service_healthy
       # Ordering only — clone-from-qa exits 0 whether it ran or self-skipped.
       clone-from-qa:
+        condition: service_completed_successfully
+      clone-emr-artifacts-from-qa:
         condition: service_completed_successfully
     environment:
       BOOTSTRAP: ${BOOTSTRAP:-false}
@@ -142,6 +195,38 @@ services:
     volumes:
       - "./:/workspace"
       - "${DP_CONFIG_ROOT_HOST:-../idac-dp-config}:/dp-config:ro"
+    restart: "no"
+
+  # Seeds synthetic 'COMPLETED' rows into local_common_db.auditlog so DAGs that
+  # gate on prior-run success (sidsum, silver, gold) can clear their first run
+  # on a fresh local stack. Idempotent: per-triple it skips if the Glue
+  # partition is already registered, so re-running on a populated stack is a no-op.
+  # Reuses the spark image (PySpark + Hadoop-AWS already baked in) so we don't
+  # add a new image just for one parquet write.
+  seed-auditlog:
+    image: idac-localstack-spark:latest
+    entrypoint: ["/bin/bash", "/workspace/scripts/bootstrap/seed-auditlog/seed-auditlog.sh"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+      # Must come after setup-glue: we register Glue partitions on the table
+      # it just created.
+      setup-glue:
+        condition: service_completed_successfully
+    environment:
+      BOOTSTRAP: ${BOOTSTRAP:-false}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-northeast-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      LOCAL_DATA_BUCKET: ${LOCAL_DATA_BUCKET:-idac-data-local}
+      LOCAL_COMMON_DB: ${LOCAL_COMMON_DB:-local_common_db}
+      TARGET_ENV: local
+      # Semicolon-separated list of jobId:jobName:tenantId triples to seed.
+      # Add more as new gating queries surface (silver/gold/migration DAGs).
+      AUDITLOG_SEEDS: ${AUDITLOG_SEEDS:-browser_extension_silver_transformation:browser_extension_silver_transformation:ALL_DEFAULT}
+    volumes:
+      - "./:/workspace"
     restart: "no"
 
   # Pre-pull the airflow image so LocalStack MWAA's create-environment doesn't
@@ -209,6 +294,8 @@ services:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: ap-northeast-1
+      AWS_REGION: ap-northeast-1
+      AWS_ENDPOINT_URL: http://localstack:4566
     ports:
       - "7077:7077"
       - "8080:8080"
@@ -231,11 +318,14 @@ services:
     # Upstream PySpark scripts pin spark.hadoop.fs.s3a.aws.credentials.provider
     # to DefaultAWSCredentialsProviderChain, which ignores the access.key/secret.key
     # confs and only reads env vars / IMDS. Executors must therefore find AWS
-    # creds in their JVM environment to talk to LocalStack S3.
+    # creds in their JVM environment to talk to LocalStack S3. The remaining
+    # vars mirror spark-master's block — see the rationale comment there.
     environment:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: ap-northeast-1
+      AWS_REGION: ap-northeast-1
+      AWS_ENDPOINT_URL: http://localstack:4566
     ports:
       - "8081:8081"
     volumes:
@@ -278,6 +368,68 @@ services:
       retries: 5
       start_period: 5s
     restart: unless-stopped
+
+  # Sbt fat-JAR builder image. Never started for real work — `build-or-detect-jar.sh`
+  # spawns it as a sibling container via the host docker socket. Declared here only
+  # so `docker compose build` produces this image alongside publish-transformation,
+  # and the depends_on hop guarantees it exists before a publish runs.
+  # `command: --script-version` makes "running" this service a <1s no-op (sbt prints
+  # its version then exits 0), which satisfies service_completed_successfully.
+  transformation-builder:
+    image: idac-localstack/transformation-builder:latest
+    build:
+      context: publishers/transformation-engine
+      dockerfile: Dockerfile.builder
+    command: ["--script-version"]
+    restart: "no"
+
+  # Startup + developer entrypoint:
+  #   docker compose up -d                       # publishes gold + silver by default
+  #   docker compose run --rm publish-transformation silver
+  # Chains build-or-detect-jar.sh -> jar-to-intermediate.sh -> intermediate-to-s3.sh.
+  # Uses the host's docker socket so build-or-detect-jar.sh can spawn the sbt
+  # builder as a SIBLING container (path translation is via HOST_TRANSFORMATION_ENGINE_DIR
+  # below — sibling containers see host paths, not this container's mount points).
+  publish-transformation:
+    build:
+      context: .
+      dockerfile: publishers/transformation-engine/Dockerfile.publish-transformation
+    command: ["gold", "silver"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+      transformation-builder:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-northeast-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      LOCAL_EMR_BUCKET: ${LOCAL_EMR_BUCKET:-idac-emr-bucket-local}
+      BUILDER_IMAGE: idac-localstack/transformation-builder:latest
+      BUILDER_CACHE_VOLUME: idac-transformation-builder-cache
+      # Container-side path the chained scripts read for source detection / unzip targets.
+      TRANSFORMATION_ENGINE_DIR: /transformation-engine
+      # Host-side path passed through to `docker run -v` for the sbt builder sibling.
+      # The sibling container's bind mount must point at a path that exists on the host,
+      # not at /transformation-engine which only exists inside this container.
+      HOST_TRANSFORMATION_ENGINE_DIR: ${PWD:?run docker compose from idac-localstack}/../idac-transformation-engine
+      # Persisted across publish runs — first delta-*.jar download is online, rest are cached.
+      MAVEN_CACHE_DIR: /tmp/maven-cache
+    volumes:
+      - "./:/workspace"
+      - "../idac-transformation-engine:/transformation-engine"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "idac-publish-maven-cache:/tmp/maven-cache"
+    restart: "no"
+
+# Persist the Maven Central delta-*.jar fetches between `compose run --rm` invocations
+# so subsequent publishes are network-free for dependencies.
+volumes:
+  idac-publish-maven-cache:
+    name: idac-publish-maven-cache
 
 # Pin the network name so MAIN_DOCKER_NETWORK above matches.
 networks:

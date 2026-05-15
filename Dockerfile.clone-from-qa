@@ -1,4 +1,4 @@
-FROM amazon/aws-cli:latest
+FROM amazon/aws-cli:2.15.0
 
 RUN yum install -y bash findutils jq >/dev/null && yum clean all
 
